@@ -23,6 +23,8 @@
 #include <cstdint> // For uint64_t
 #include <iostream>
 #include <iomanip>
+#include <cmath> // For cos and sin
+#include <limits>
 
 #define LB32_MASK   0x00000001
 #define LB64_MASK   0x0000000000000001
@@ -467,6 +469,10 @@ XZZPCBFile::XZZPCBFile(std::vector<char> &buf, std::string filepath) {
 	translate_segments();
 	translate_pins();
 	
+	determine_board_center();
+	clean_outline_segments();
+	assign_component_sides();
+	
 	valid = 1;
 
 	num_parts  = parts.size();
@@ -645,6 +651,104 @@ void XZZPCBFile::parse_arc_block(std::vector<uint32_t> &buf) {
 	std::move(segments.begin(), segments.end(), std::back_inserter(outline_segments));
 }
 
+void XZZPCBFile::assign_component_sides() {
+    for (auto &part : parts) {
+        // Calculate pin range for this part
+        int previous_end = (parts.size() > 1 && &part != &parts.front()) ? 
+            ((&part - 1)->end_of_pins) : 0;
+        int pin_count = part.end_of_pins - previous_end;
+        size_t start_pin = part.end_of_pins - pin_count;
+        
+        if (pin_count > 0) {
+            // Handle single-pin unconnected components (likely drill holes)
+            if (pin_count == 1 && start_pin < pins.size()) {
+                auto &pin = pins[start_pin];
+                if (strcmp(pin.net, "UNCONNECTED") == 0 || 
+                    strcmp(pin.net, "NC") == 0 || 
+                    strlen(pin.net) == 0) {
+                    // Check if this hole is on the "far" side and needs mirroring
+                    if (pin.pos.x > board_center_x) {
+                        pin.pos.x = 2 * board_center_x - pin.pos.x;
+                    }
+                    // Mark as through-hole/drill hole
+                    part.mounting_side = BRDPartMountingSide::Both;
+                    part.part_type = BRDPartType::ThroughHole;
+                    pin.side = BRDPinSide::Both;
+                    continue;
+                }
+            }
+            
+            // First determine if this is a through-hole component by checking pin positions
+            bool is_through_hole = false;
+            
+            // For components with multiple pins, check if any pins have matching positions
+            if (pin_count > 1) {
+                for (size_t i = start_pin; i < part.end_of_pins; i++) {
+                    if (i < pins.size()) {
+                        float mirrored_x = 2 * board_center_x - pins[i].pos.x;
+                        
+                        // Check other pins in this component for matching positions
+                        for (size_t j = start_pin; j < part.end_of_pins; j++) {
+                            if (j != i && j < pins.size()) {
+                                // If we find a pin with matching mirrored x and same y,
+                                // this is likely a through-hole
+                                if (std::abs(pins[j].pos.x - mirrored_x) < 0.1f && 
+                                    std::abs(pins[j].pos.y - pins[i].pos.y) < 0.1f) {
+                                    is_through_hole = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (is_through_hole) break;
+                    }
+                }
+            }
+
+            if (is_through_hole) {
+                // Through-hole component - make visible from both sides
+                part.mounting_side = BRDPartMountingSide::Both;
+                part.part_type = BRDPartType::ThroughHole;
+                
+                for (size_t i = start_pin; i < part.end_of_pins; i++) {
+                    if (i < pins.size()) {
+                        pins[i].side = BRDPinSide::Both;
+                    }
+                }
+            } else {
+                // Surface mount component - determine side based on average x position
+                int32_t part_x = 0;
+                for (size_t i = start_pin; i < part.end_of_pins; i++) {
+                    if (i < pins.size()) {
+                        part_x += pins[i].pos.x;
+                    }
+                }
+                part_x /= pin_count;
+                
+                part.mounting_side = (part_x < board_center_x) ? 
+                    BRDPartMountingSide::Top : BRDPartMountingSide::Bottom;
+                part.part_type = BRDPartType::SMD;
+                
+                // For bottom side components, mirror all pin positions
+                if (part.mounting_side == BRDPartMountingSide::Bottom) {
+                    for (size_t i = start_pin; i < part.end_of_pins; i++) {
+                        if (i < pins.size()) {
+                            pins[i].pos.x = 2 * board_center_x - pins[i].pos.x;
+                            pins[i].side = BRDPinSide::Bottom;
+                        }
+                    }
+                } else {
+                    for (size_t i = start_pin; i < part.end_of_pins; i++) {
+                        if (i < pins.size()) {
+                            pins[i].side = BRDPinSide::Top;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Modify parse_line_segment_block to handle the outline sides:
 void XZZPCBFile::parse_line_segment_block(std::vector<uint32_t> &buf) {
     int32_t layer = buf[0];
     int32_t x1 = buf[1];
@@ -667,7 +771,38 @@ void XZZPCBFile::parse_line_segment_block(std::vector<uint32_t> &buf) {
 	point2.y = static_cast<double>(y2) / scale;
 	outline_segments.push_back({point, point2});
 }
+bool XZZPCBFile::segment_belongs_to_top(const BRDPoint &p1, const BRDPoint &p2) {
+    // Points on the same side of center_x belong to the same board side
+    return ((p1.x + p2.x) / 2.0f) < board_center_x;
+}
 
+void XZZPCBFile::determine_board_center() {
+    // Find the y-axis center line where the board "folds" AFTER all of the segments are loaded
+    int32_t min_x = std::numeric_limits<int32_t>::max();
+    int32_t max_x = std::numeric_limits<int32_t>::lowest();
+    
+    // First pass - find x range
+    for (const auto &segment : outline_segments) {
+        min_x = std::min({min_x, segment.first.x, segment.second.x});
+        max_x = std::max({max_x, segment.first.x, segment.second.x});
+    }
+    
+    board_center_x = (min_x + max_x) / 2.0f;
+}
+
+// Add new method to clean up duplicate segments
+void XZZPCBFile::clean_outline_segments() {
+    std::vector<std::pair<BRDPoint, BRDPoint>> top_segments;
+    
+    // Keep only segments that belong to top side
+    for (const auto &segment : outline_segments) {
+        if (segment_belongs_to_top(segment.first, segment.second)) {
+            top_segments.push_back(segment);
+        }
+    }
+    
+    outline_segments = std::move(top_segments);
+}
 void XZZPCBFile::parse_part_block(std::vector<char> &buf) {
 	BRDPart blank_part;
 	BRDPin blank_pin;

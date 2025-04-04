@@ -27,6 +27,7 @@ struct XZZPCBFile : public BRDFileBase {
 	std::vector<std::pair<BRDPoint, BRDPoint>> xzz_arc_to_segments(int startAngle, int endAngle, int r, BRDPoint pc);
 	void parse_arc_block(std::vector<uint32_t> &buf);
 	void parse_line_segment_block(std::vector<uint32_t> &buf);
+	void clean_outline_segments();
 	void parse_part_block(std::vector<char> &buf);
 	void parse_test_pad_block(std::vector<uint8_t> &buf);
 	void parse_post_v6(std::vector<char>::iterator v6_pos, std::vector<char> &buf);
@@ -40,4 +41,9 @@ struct XZZPCBFile : public BRDFileBase {
     void translate_segments();
 	void translate_points(BRDPoint &point);
 	void translate_pins();
+
+    float board_center_x;
+    bool segment_belongs_to_top(const BRDPoint &p1, const BRDPoint &p2);
+    void determine_board_center();
+    void assign_component_sides();
 };
