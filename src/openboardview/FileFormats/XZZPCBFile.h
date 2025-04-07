@@ -20,30 +20,29 @@ struct XZZPCBFile : public BRDFileBase {
 	int diode_readings_type = 0; // 0 = No readings, 1 = Based on part name and pin name, 2 = Based on net
 
 	// DES
-	uint64_t des(uint64_t input, uint64_t key, char mode);
 	void des_decrypt(std::vector<char> &buf);
-    void decryptWithDES(std::vector<char> &buf);
+	void decryptWithDES(std::vector<char> &buf);
 
 	std::vector<std::pair<BRDPoint, BRDPoint>> xzz_arc_to_segments(int startAngle, int endAngle, int r, BRDPoint pc);
 	void parse_arc_block(std::vector<uint32_t> &buf);
 	void parse_line_segment_block(std::vector<uint32_t> &buf);
-	void clean_outline_segments();
 	void parse_part_block(std::vector<char> &buf);
 	void parse_test_pad_block(std::vector<uint8_t> &buf);
 	void parse_post_v6(std::vector<char>::iterator v6_pos, std::vector<char> &buf);
 	void parse_net_block(std::vector<char> &buf);
 	void process_block(uint8_t block_type, std::vector<char> &block_buf);
 
-    char read_utf8_char(char c);
+	char read_utf8_char(char c) const;
 	std::string read_cb2312_string(const std::string &str);
 
 	void find_xy_translation();
-    void translate_segments();
-	void translate_points(BRDPoint &point);
+	void translate_segments();
+	void translate_points(BRDPoint &point) const;
 	void translate_pins();
 
-    float board_center_x;
-    bool segment_belongs_to_top(const BRDPoint &p1, const BRDPoint &p2);
-    void determine_board_center();
-    void assign_component_sides();
+	float board_center_x;
+	void clean_outline_segments();
+	bool segment_belongs_to_top(const BRDPoint &p1, const BRDPoint &p2);
+	void determine_board_center();
+	void assign_component_sides();
 };
